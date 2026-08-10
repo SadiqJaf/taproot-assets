@@ -58,3 +58,6 @@ vendor/
 /taproot-assets-*
 .aider*
 bench/results/
+
+# Logs from integration test runs started via the Makefile targets.
+/regtest/
