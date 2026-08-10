@@ -40,6 +40,12 @@
   if the channel selected as the SCID alias base had not negotiated
   the `option_scid_alias` feature.
 
+* [PR#2235](https://github.com/lightninglabs/taproot-assets/pull/2235)
+  fixes a bug in which a forwarded HTLC that ends up being resolved on
+  chain could shut down the daemon, and prevent it from starting again,
+  because `lnd` rejects any resolution the HTLC interceptor sends for
+  such an HTLC.
+
 # New Features
 
 ## Functional Enhancements
