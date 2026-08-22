@@ -502,6 +502,21 @@ func validExternalV0WitnessStack(witness wire.TxWitness) bool {
 	return len(witness) == 1 && len(witness[0]) == schnorr.SignatureSize
 }
 
+// addExternalWitness merges one already decoded authorization into the common
+// witness union. Different pending asset IDs remain stock-compatible across
+// the GroupWitness and signed-PSBT encodings; only a second authorization for
+// the same ID is ambiguous and rejected.
+func addExternalWitness(external map[asset.ID]PendingGroupWitness,
+	witness PendingGroupWitness, duplicateLabel string) error {
+
+	if _, ok := external[witness.GenID]; ok {
+		return fmt.Errorf("%s for asset ID: %v", duplicateLabel,
+			witness.GenID)
+	}
+	external[witness.GenID] = witness
+	return nil
+}
+
 // collectExternalWitnesses validates the caller-provided witness union before
 // any witness is put in the lookup map. knownAssetID must describe the exact
 // set of group requests in the funded batch.
@@ -515,12 +530,11 @@ func collectExternalWitnesses(witnesses []PendingGroupWitness,
 			return nil, fmt.Errorf("witness has no matching seedling: %v",
 				witness)
 		}
-		if _, ok := external[witness.GenID]; ok {
-			return nil, fmt.Errorf("duplicate external group witness for "+
-				"asset ID: %v", witness.GenID)
+		if err := addExternalWitness(
+			external, witness, "duplicate external group witness",
+		); err != nil {
+			return nil, err
 		}
-
-		external[witness.GenID] = witness
 	}
 
 	return external, nil
@@ -2637,7 +2651,6 @@ func (c *ChainPlanter) sealBatch(ctx context.Context, params SealParams,
 				return req.NewAsset.ID()
 			},
 		)
-
 		if _, ok := externalWitnesses[genesisAssetID]; ok {
 			return nil, fmt.Errorf("signed PSBT is a duplicate "+
 				"witness for asset ID: %v", genesisAssetID)
@@ -2665,9 +2678,15 @@ func (c *ChainPlanter) sealBatch(ctx context.Context, params SealParams,
 		}
 
 		// Add the witness to the set of external witnesses.
-		externalWitnesses[genesisAssetID] = PendingGroupWitness{
+		signedWitness := PendingGroupWitness{
 			GenID:   genesisAssetID,
 			Witness: tx.TxIn[0].Witness,
+		}
+		if err := addExternalWitness(
+			externalWitnesses, signedWitness,
+			"signed PSBT is a duplicate witness",
+		); err != nil {
+			return nil, err
 		}
 	}
 

@@ -104,6 +104,39 @@ func TestCollectExternalWitnessesRejectsInvalidUnions(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestDisjointGroupWitnessAndSignedPSBTUnionCompatibility(t *testing.T) {
+	groupWitnessID := asset.ID{1}
+	signedPSBTID := asset.ID{2}
+	known := func(id asset.ID) bool {
+		return id == groupWitnessID || id == signedPSBTID
+	}
+
+	// collectExternalWitnesses is the GroupWitness half of SealBatch's
+	// authorization union. addExternalWitness is also used after a signed
+	// virtual PSBT has been finalized and its witness extracted.
+	union, err := collectExternalWitnesses([]PendingGroupWitness{{
+		GenID: groupWitnessID, Witness: wire.TxWitness{make([]byte, 64)},
+	}}, known)
+	require.NoError(t, err)
+	require.NoError(t, addExternalWitness(
+		union, PendingGroupWitness{
+			GenID:   signedPSBTID,
+			Witness: wire.TxWitness{make([]byte, 64)},
+		}, "signed PSBT is a duplicate witness",
+	))
+	require.Len(t, union, 2)
+
+	// The same encoding union becomes invalid only when both encodings claim
+	// the same pending asset ID.
+	err = addExternalWitness(
+		union, PendingGroupWitness{
+			GenID:   groupWitnessID,
+			Witness: wire.TxWitness{make([]byte, 64)},
+		}, "signed PSBT is a duplicate witness",
+	)
+	require.ErrorContains(t, err, "signed PSBT is a duplicate witness")
+}
+
 func TestValidExternalV0WitnessStack(t *testing.T) {
 	tests := []struct {
 		name  string
