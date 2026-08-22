@@ -482,6 +482,116 @@ func (c *ChainPlanter) newCaretakerForBatch(batch *MintingBatch,
 	return caretaker
 }
 
+// groupKeyRequestIsLocal reports whether a group-key request can be signed by
+// this daemon's key ring. The group-key request retains the raw descriptor,
+// so use the same locality rule as asset.GroupKey rather than inferring it
+// from the presence of an external witness.
+func groupKeyRequestIsLocal(req asset.GroupKeyRequest) bool {
+	return (&asset.GroupKey{RawKey: req.RawKey}).IsLocal()
+}
+
+func externalV0GroupKeyRequest(req asset.GroupKeyRequest) bool {
+	return req.Version == asset.GroupKeyV0 && !groupKeyRequestIsLocal(req) &&
+		len(req.TapscriptRoot) == 0
+}
+
+// validExternalV0WitnessStack restricts V0 external authorization to the
+// key-path Schnorr signature form. This prevents an annex or script-path
+// stack from being accepted as an external V0 witness.
+func validExternalV0WitnessStack(witness wire.TxWitness) bool {
+	return len(witness) == 1 && len(witness[0]) == schnorr.SignatureSize
+}
+
+// collectExternalWitnesses validates the caller-provided witness union before
+// any witness is put in the lookup map. knownAssetID must describe the exact
+// set of group requests in the funded batch.
+func collectExternalWitnesses(witnesses []PendingGroupWitness,
+	knownAssetID func(asset.ID) bool) (
+	map[asset.ID]PendingGroupWitness, error) {
+
+	external := make(map[asset.ID]PendingGroupWitness, len(witnesses))
+	for _, witness := range witnesses {
+		if !knownAssetID(witness.GenID) {
+			return nil, fmt.Errorf("witness has no matching seedling: %v",
+				witness)
+		}
+		if _, ok := external[witness.GenID]; ok {
+			return nil, fmt.Errorf("duplicate external group witness for "+
+				"asset ID: %v", witness.GenID)
+		}
+
+		external[witness.GenID] = witness
+	}
+
+	return external, nil
+}
+
+// requireExternalV0Witnesses enforces a one-to-one witness handoff for all
+// non-local V0 requests. In particular, a missing witness must fail before
+// the local GenSigner fallback is reached.
+func requireExternalV0Witnesses(required map[asset.ID]struct{},
+	witnesses map[asset.ID]PendingGroupWitness) error {
+	for assetID := range required {
+		if _, ok := witnesses[assetID]; !ok {
+			return fmt.Errorf("%w: asset ID %v",
+				ErrExternalGroupWitnessRequired, assetID)
+		}
+	}
+
+	return nil
+}
+
+// requiredExternalV0WitnessIDs returns the exact origin or later-tranche
+// requests in the selected externally witnessed V0 supply profile. The raw
+// key's family is the daemon ownership marker; a zero locator must never fall
+// through to the local signer.
+func requiredExternalV0WitnessIDs(groupReqs []asset.GroupKeyRequest,
+	seedlings map[string]*Seedling) map[asset.ID]struct{} {
+
+	required := make(map[asset.ID]struct{})
+	for _, req := range groupReqs {
+		seedling := seedlings[req.NewAsset.Genesis.Tag]
+		if seedling == nil || !seedling.SupplyCommitments ||
+			!externalV0GroupKeyRequest(req) {
+
+			continue
+		}
+
+		required[req.NewAsset.ID()] = struct{}{}
+	}
+
+	return required
+}
+
+// batchRequiresExternalV0Witness identifies a pending batch whose existing
+// group membership cannot be authorized by the local signer. Such batches
+// must remain pending across restarts until the caller supplies the witness.
+func batchRequiresExternalV0Witness(batch *MintingBatch) bool {
+	for _, seedling := range batch.Seedlings {
+		var groupKey *asset.GroupKey
+		switch {
+		case seedling.GroupInfo != nil && seedling.GroupInfo.GroupKey != nil:
+			groupKey = seedling.GroupInfo.GroupKey
+		case seedling.EnableEmission && seedling.GroupInternalKey != nil &&
+			seedling.ExternalKey.IsNone():
+			groupKey = &asset.GroupKey{
+				RawKey:  *seedling.GroupInternalKey,
+				Version: asset.GroupKeyV0,
+			}
+		default:
+			continue
+		}
+
+		if groupKey.Version == asset.GroupKeyV0 &&
+			!groupKey.IsLocal() && len(groupKey.TapscriptRoot) == 0 &&
+			seedling.SupplyCommitments {
+			return true
+		}
+	}
+
+	return false
+}
+
 // Start starts the ChainPlanter and any goroutines it needs to carry out its
 // duty.
 func (c *ChainPlanter) Start() error {
@@ -527,6 +637,27 @@ func (c *ChainPlanter) Start() error {
 			// manually.
 			if batch.AssetMetas == nil {
 				batch.AssetMetas = make(AssetMetas)
+			}
+
+			// A non-local V0 group cannot be sealed without a witness from
+			// the group-key owner. That witness is intentionally supplied
+			// through SealBatch and is not reconstructed from the database.
+			// Keep such a batch pending across restarts instead of funding,
+			// sealing with the local signer, cancelling it, or starting a
+			// caretaker that cannot make progress. There is only one active
+			// pending batch by design; leave any additional batch untouched.
+			if batch.State() == BatchStatePending &&
+				batchRequiresExternalV0Witness(batch) {
+				if c.pendingBatch == nil {
+					c.pendingBatch = batch
+					continue
+				}
+
+				startErr = fmt.Errorf("%w: existing batch %x, "+
+					"additional batch %x", ErrMultipleExternalWitnessBatches,
+					c.pendingBatch.BatchKey.PubKey.SerializeCompressed(),
+					batch.BatchKey.PubKey.SerializeCompressed())
+				return
 			}
 
 			// If batch funding or sealing fail during startup, the
@@ -2470,14 +2601,11 @@ func (c *ChainPlanter) sealBatch(ctx context.Context, params SealParams,
 		})...,
 	)
 
-	externalWitnesses := make(map[asset.ID]PendingGroupWitness)
-	for _, wit := range params.GroupWitnesses {
-		if !seedlingAssetIDs.Contains(wit.GenID) {
-			return nil, fmt.Errorf("witness has no matching "+
-				"seedling: %v", wit)
-		}
-
-		externalWitnesses[wit.GenID] = wit
+	externalWitnesses, err := collectExternalWitnesses(
+		params.GroupWitnesses, seedlingAssetIDs.Contains,
+	)
+	if err != nil {
+		return nil, err
 	}
 
 	// Extract witnesses from signed group virtual PSBTs.
@@ -2543,6 +2671,15 @@ func (c *ChainPlanter) sealBatch(ctx context.Context, params SealParams,
 		}
 	}
 
+	requiredExternal := requiredExternalV0WitnessIDs(
+		groupReqs, groupSeedlings,
+	)
+	if err := requireExternalV0Witnesses(
+		requiredExternal, externalWitnesses,
+	); err != nil {
+		return nil, err
+	}
+
 	// Formulate new asset groups from the group key requests.
 	newAssetGroups := make([]*asset.AssetGroup, 0, len(groupReqs))
 	for i := 0; i < len(groupReqs); i++ {
@@ -2560,6 +2697,16 @@ func (c *ChainPlanter) sealBatch(ctx context.Context, params SealParams,
 		groupWitness, ok := externalWitnesses[reqAssetID]
 		switch {
 		case ok:
+			if externalV0GroupKeyRequest(groupReq) {
+				// V0 external witnesses authorize the key-path group
+				// signature only. Reject extra stack elements, annexes,
+				// and script-path witnesses before they reach the VM.
+				if !validExternalV0WitnessStack(groupWitness.Witness) {
+					return nil, fmt.Errorf("invalid external V0 group "+
+						"witness stack for asset ID: %v", reqAssetID)
+				}
+			}
+
 			// Set the provided witness; it will be validated below.
 			subtreeRoot := groupReq.CustomTapscriptRoot
 			groupKey = &asset.GroupKey{
@@ -2572,6 +2719,15 @@ func (c *ChainPlanter) sealBatch(ctx context.Context, params SealParams,
 			}
 
 		default:
+			// Never invoke the local signer for an existing non-local V0
+			// group. The owner must explicitly provide its witness, and
+			// silently deriving one here would make a restart or a caller
+			// omission indistinguishable from a valid authorization.
+			if _, required := requiredExternal[reqAssetID]; required {
+				return nil, fmt.Errorf("%w: asset ID %v",
+					ErrExternalGroupWitnessRequired, reqAssetID)
+			}
+
 			// Derive the asset group witness.
 			groupKey, err = asset.DeriveGroupKey(
 				c.cfg.GenSigner, genTX, groupReq, nil,
@@ -2894,6 +3050,15 @@ func (c *ChainPlanter) prepSeedlingDelegationKey(ctx context.Context,
 // either adds it to an existing pending batch or creates a new batch for it.
 func (c *ChainPlanter) prepAssetSeedling(ctx context.Context,
 	req *Seedling) error {
+	// Once the anchor transaction is funded, the batch's asset set and all
+	// group-key requests are immutable. In particular, allowing another
+	// seedling here could change the witness set after an external signer had
+	// approved it.
+	if c.pendingBatch != nil && c.pendingBatch.IsFunded() &&
+		batchRequiresExternalV0Witness(c.pendingBatch) {
+
+		return ErrBatchAlreadyFunded
+	}
 
 	// If the seedling has the universe/supply commitment feature enabled,
 	// finalize the delegation key.

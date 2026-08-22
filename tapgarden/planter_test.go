@@ -1916,6 +1916,7 @@ func testFundSealBeforeFinalize(t *mintingTestHarness) {
 	// the private key so that the planter can produce an asset group
 	// witness during batch sealing.
 	groupInternalKeyDesc, groupInternalKeyPriv := test.RandKeyDesc(t)
+	groupInternalKeyDesc.Family = asset.TaprootAssetsKeyFamily
 	t.keyRing.Keys[groupInternalKeyDesc.KeyLocator] = groupInternalKeyPriv
 
 	// We'll use the default test tapscript tree for both the batch

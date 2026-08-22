@@ -184,11 +184,19 @@ func (c Seedling) validateFields() error {
 // with a seedling is owned by the daemon and can be used with this seedling.
 func (c Seedling) validateGroupKey(group asset.AssetGroup,
 	anchorMeta *proof.MetaReveal) error {
+	if group.GroupKey == nil {
+		return fmt.Errorf("group key is nil")
+	}
 
-	// If an external key isn't specified but the actual group key used
-	// isn't local to this daemon, we won't be able to sign with it.
-	if c.ExternalKey.IsNone() && !group.GroupKey.IsLocal() {
-		groupKeyBytes := c.GroupInfo.GroupPubKey.SerializeCompressed()
+	// V0 group witnesses may be supplied later, at SealBatch time, by an
+	// external signer. V1 still requires an ExternalKey here because its
+	// group-key construction is PSBT based and cannot use the V0 witness
+	// path. Local keys continue to use the daemon signer as before.
+	if c.ExternalKey.IsNone() && !group.GroupKey.IsLocal() &&
+		(group.GroupKey.Version != asset.GroupKeyV0 ||
+			len(group.GroupKey.TapscriptRoot) != 0 ||
+			!c.SupplyCommitments) {
+		groupKeyBytes := group.GroupKey.GroupPubKey.SerializeCompressed()
 		return fmt.Errorf("can't sign with group key %x", groupKeyBytes)
 	}
 

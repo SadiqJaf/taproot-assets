@@ -445,4 +445,18 @@ var (
 	// ErrBatchAlreadySealed is returned when a minting batch is already
 	// sealed.
 	ErrBatchAlreadySealed = errors.New("batch is already sealed")
+
+	// ErrBatchAlreadyFunded is returned when a caller attempts to add a
+	// seedling to a batch after its anchor transaction has been funded.
+	ErrBatchAlreadyFunded = errors.New("batch is already funded")
+
+	// ErrExternalGroupWitnessRequired is returned when a V0 group key is
+	// owned outside of the daemon and no witness was supplied for it.
+	ErrExternalGroupWitnessRequired = errors.New(
+		"an external group witness is required for this V0 group key")
+
+	// ErrMultipleExternalWitnessBatches is returned when restart recovery
+	// finds more than one pending batch that requires an external V0 witness.
+	ErrMultipleExternalWitnessBatches = errors.New(
+		"multiple pending batches require external group witnesses")
 )
