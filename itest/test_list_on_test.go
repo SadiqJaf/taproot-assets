@@ -432,6 +432,10 @@ var allTestCases = []*testCase{
 		test: testSupplyCommitMintBurn,
 	},
 	{
+		name: "supply commit idle tick",
+		test: testSupplyCommitIdleTick,
+	},
+	{
 		name: "supply verify peer node",
 		test: testSupplyVerifyPeerNode,
 	},

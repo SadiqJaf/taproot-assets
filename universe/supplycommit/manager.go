@@ -89,6 +89,23 @@ type ManagerCfg struct {
 	// IgnoreCheckerCache is used to invalidate the ignore cache when a new
 	// supply commitment is created.
 	IgnoreCheckerCache IgnoreCheckerCache
+
+	// IdleCommitInterval is the number of blocks after which a locally
+	// controlled asset group with a confirmed supply commitment
+	// automatically publishes an ancestry-linked successor commitment, even
+	// if there are no new supply updates. Zero disables idle successors.
+	IdleCommitInterval uint32
+
+	// AutoPublishPending, if true, automatically publishes pending supply
+	// updates when the next block arrives, instead of waiting for a manual
+	// UpdateSupplyCommit call.
+	AutoPublishPending bool
+}
+
+// autoCommitEnabled returns true if the manager should emit an idle tick for
+// every new block.
+func (c *ManagerCfg) autoCommitEnabled() bool {
+	return c.IdleCommitInterval > 0 || c.AutoPublishPending
 }
 
 // Manager is a manager for multiple supply commitment state
@@ -123,12 +140,108 @@ func NewManager(cfg ManagerCfg) *Manager {
 
 // Start starts the multi state machine manager.
 func (m *Manager) Start() error {
+	var startErr error
 	m.startOnce.Do(func() {
 		// Initialize the state machine cache.
 		m.smCache = newStateMachineCache()
+
+		// If idle successors or automatic publishing is enabled, we
+		// need to tick the state machines as new blocks arrive.
+		if !m.cfg.autoCommitEnabled() {
+			return
+		}
+
+		ctx, cancel := m.WithCtxQuitNoTimeout()
+		blockChan, errChan, err := m.cfg.Chain.RegisterBlockEpochNtfn(
+			ctx,
+		)
+		if err != nil {
+			cancel()
+			startErr = fmt.Errorf("unable to register for block "+
+				"epochs: %w", err)
+
+			return
+		}
+
+		log.Infof("Supply commit idle ticker enabled "+
+			"(idle_commit_interval=%d blocks, "+
+			"auto_publish_pending=%v)", m.cfg.IdleCommitInterval,
+			m.cfg.AutoPublishPending)
+
+		m.Wg.Add(1)
+		go func() {
+			defer m.Wg.Done()
+			defer cancel()
+
+			m.idleTickLoop(ctx, blockChan, errChan)
+		}()
 	})
 
-	return nil
+	return startErr
+}
+
+// idleTickLoop sends an IdleTickEvent to the state machine of every locally
+// controlled asset group that supports supply commitments for each new block.
+func (m *Manager) idleTickLoop(ctx context.Context, blockChan chan int32,
+	errChan chan error) {
+
+	for {
+		select {
+		case height := <-blockChan:
+			if height < 0 {
+				continue
+			}
+
+			m.sendIdleTicks(ctx, uint32(height))
+
+		case err := <-errChan:
+			if err != nil {
+				log.Errorf("Supply commit idle ticker stopped "+
+					"on block epoch error: %v", err)
+			}
+
+			return
+
+		case <-ctx.Done():
+			return
+
+		case <-m.Quit:
+			return
+		}
+	}
+}
+
+// sendIdleTicks sends an idle tick for the given block height to all locally
+// controlled supply commit asset groups. Errors are logged, a single failing
+// group must not stop the others.
+func (m *Manager) sendIdleTicks(ctx context.Context, height uint32) {
+	groupKeys, err := m.cfg.AssetLookup.FetchSupplyCommitAssets(ctx, true)
+	if err != nil {
+		log.Errorf("Unable to fetch supply commit assets for idle "+
+			"tick at height %d: %v", height, err)
+
+		return
+	}
+
+	for idx := range groupKeys {
+		groupKey := groupKeys[idx]
+		assetSpec := asset.NewSpecifierFromGroupKey(groupKey)
+
+		sm, err := m.fetchStateMachine(assetSpec)
+		if err != nil {
+			log.Errorf("Unable to get state machine for idle "+
+				"tick (asset=%s, height=%d): %v",
+				assetSpec.String(), height, err)
+
+			continue
+		}
+
+		// SendEvent blocks while the state machine is busy, so make
+		// sure we don't hang forever.
+		sendCtx, cancel := context.WithTimeout(ctx, DefaultTimeout)
+		sm.SendEvent(sendCtx, &IdleTickEvent{BlockHeight: height})
+		cancel()
+	}
 }
 
 // Stop stops the multi state machine manager, which in turn stops all asset
@@ -164,6 +277,8 @@ func (m *Manager) startAssetSM(ctx context.Context,
 		CommitConfTarget:   DefaultCommitConfTarget,
 		ChainParams:        m.cfg.ChainParams,
 		IgnoreCheckerCache: m.cfg.IgnoreCheckerCache,
+		IdleCommitInterval: m.cfg.IdleCommitInterval,
+		AutoPublishPending: m.cfg.AutoPublishPending,
 	}
 
 	// Before we start the state machine, we'll need to fetch the current

@@ -381,6 +381,18 @@
   `universe.mbox-cleanup-check-timeout` to configure periodic cleanup of
   auth mailbox messages whose claimed outpoints have been spent on chain.
 
+- [#1781](https://github.com/lightninglabs/taproot-assets/issues/1781)
+  and [#1807](https://github.com/lightninglabs/taproot-assets/issues/1807):
+  adds `universe.supply-idle-commit-interval` (blocks, 0 disables, default
+  off) which makes the supply commitment state machine start an empty
+  successor commitment once the latest one is that many blocks old, and
+  `universe.supply-auto-publish-pending` which publishes staged supply
+  updates on the next block. With `supply-auto-publish-pending` enabled,
+  pending updates may be broadcast before a manual `UpdateSupplyCommit`
+  call; integration tests that assert an empty mempool immediately after
+  staging ignores (for example `supply_commit_ignore_asset`) assume
+  auto-publish is off.
+
 # Tooling and Documentation
 
 - [PR#1962](https://github.com/lightninglabs/taproot-assets/pull/1962)
