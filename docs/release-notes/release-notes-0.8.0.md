@@ -178,6 +178,13 @@
 
 ## Bug Fixes
 
+- **Deferred lease release on canceled RPC contexts**
+  ([issue #2206](https://github.com/lightninglabs/taproot-assets/issues/2206)):
+  Compensating UTXO lease releases in `CommitVirtualPsbts`, `FundPacket`,
+  and `FundBurn` now run on a bounded context that preserves request values
+  but is not canceled when the caller disconnects, so a canceled request no
+  longer leaks lnd wallet leases until they expire.
+
 - [PR#1898](https://github.com/lightninglabs/taproot-assets/pull/1898)
   ensures that funding output proofs are now always imported during
   force close handling for both channel initiator and responder.
