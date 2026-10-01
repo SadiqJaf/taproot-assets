@@ -954,6 +954,67 @@ func testSupplyCommitMintBurn(t *harnessTest) {
 		fetchResp.BurnSubtreeRoot,
 	)
 
+	// The universe server verifies every supply commitment pushed to it,
+	// including the burn leaf proofs. Those proofs must carry the
+	// provenance of the burnt input, otherwise the server rejects the
+	// commitment with "missing asset input(s)"
+	// (lightninglabs/taproot-assets#2285).
+	t.Log("Verifying the universe server accepted the burn commitment")
+	uniBurnPred := func(resp *unirpc.FetchSupplyCommitResponse) error {
+		if resp.BurnSubtreeRoot == nil {
+			return fmt.Errorf("BurnSubtreeRoot is nil")
+		}
+
+		actualSum := resp.BurnSubtreeRoot.RootNode.RootSum
+		if actualSum != int64(burnAmt) {
+			return fmt.Errorf("expected burn RootSum %d, got %d",
+				burnAmt, actualSum)
+		}
+
+		return nil
+	}
+	uniBurnReq := unirpc.FetchSupplyCommitRequest{
+		GroupKey: &unirpc.FetchSupplyCommitRequest_GroupKeyBytes{
+			GroupKeyBytes: groupKeyBytes,
+		},
+		Locator: &unirpc.FetchSupplyCommitRequest_SpentCommitOutpoint{
+			SpentCommitOutpoint: fetchResp.SpentCommitmentOutpoint,
+		},
+	}
+	uniBurnResp := rpcassert.FetchSupplyCommitRPC(
+		t.t, ctxb, t.universeServer.service, uniBurnPred, &uniBurnReq,
+	)
+	assertFetchCommitResponse(t, fetchResp, uniBurnResp)
+
+	t.Log("Verifying federation peer syncs burn supply commitment")
+	secondLnd := t.lndHarness.NewNodeWithCoins("MintBurnPeerLnd", nil)
+	secondTapd := setupTapdHarness(t.t, t, secondLnd, t.universeServer)
+	defer func() {
+		require.NoError(t.t, secondTapd.stop(!*noDelete))
+	}()
+
+	var peerBurnResp *unirpc.FetchSupplyCommitResponse
+	require.Eventually(t.t, func() bool {
+		peerBurnResp, err = secondTapd.FetchSupplyCommit(
+			ctxb, &uniBurnReq,
+		)
+		if err != nil &&
+			strings.Contains(err.Error(), "commitment not found") {
+
+			return false
+		}
+		require.NoError(t.t, err)
+
+		if peerBurnResp.BurnSubtreeRoot == nil {
+			return false
+		}
+
+		return peerBurnResp.BurnSubtreeRoot.RootNode.RootSum ==
+			int64(burnAmt)
+	}, defaultWaitTimeout, time.Second)
+	require.NotNil(t.t, peerBurnResp)
+	require.Len(t.t, peerBurnResp.BurnLeaves, 1)
+
 	t.Log("Fetching supply leaves for detailed verification")
 
 	// Fetch supply leaves to verify individual entries have all been

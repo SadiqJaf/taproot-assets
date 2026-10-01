@@ -14,6 +14,7 @@ import (
 	"github.com/lightninglabs/taproot-assets/fn"
 	internaltest "github.com/lightninglabs/taproot-assets/internal/test"
 	"github.com/lightninglabs/taproot-assets/mssmt"
+	"github.com/lightninglabs/taproot-assets/proof"
 	"github.com/lightninglabs/taproot-assets/tapgarden"
 	"github.com/lightninglabs/taproot-assets/universe"
 	"github.com/lightninglabs/taproot-assets/universe/supplycommit"
@@ -1000,6 +1001,81 @@ func TestVerifyCommit(t *testing.T) {
 	})
 }
 
+// TestBurnLeafRejectionRootCauses records the distinct verification failures
+// for burn leaves that lack a confirmed chain anchor or input provenance.
+func TestBurnLeafRejectionRootCauses(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.Background()
+
+	groupPrivKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	delegPrivKey, err := btcec.NewPrivateKey()
+	require.NoError(t, err)
+
+	burnProof := randBurnProofWithGroupKey(
+		t, groupPrivKey, delegPrivKey.PubKey(),
+	)
+	extractedGroupKey := burnProof.Asset.GroupKey
+	assetSpec := asset.NewSpecifierFromGroupKey(
+		extractedGroupKey.GroupPubKey,
+	)
+
+	burnGenesis := burnProof.Asset.Genesis
+	mockGroupFetcher := &MockGroupFetcher{}
+	mockGroupFetcher.On(
+		"FetchGroupByGroupKey",
+		mock.Anything,
+		mock.Anything,
+	).Return(&asset.AssetGroup{
+		Genesis:  &burnGenesis,
+		GroupKey: extractedGroupKey,
+	}, nil)
+
+	scriptKey := asset.RandScriptKey(t)
+	makeEntry := func(p proof.Proof) supplycommit.NewBurnEvent {
+		return supplycommit.NewBurnEvent{
+			BurnLeaf: universe.BurnLeaf{
+				UniverseKey: universe.AssetLeafKey{
+					BaseLeafKey: universe.BaseLeafKey{
+						OutPoint:  p.OutPoint(),
+						ScriptKey: &scriptKey,
+					},
+					AssetID: p.Asset.Genesis.ID(),
+				},
+				BurnProof: &p,
+			},
+		}
+	}
+
+	v := Verifier{
+		assetLog: log,
+		cfg: VerifierCfg{
+			ChainBridge:  tapgarden.NewMockChainBridge(),
+			GroupFetcher: mockGroupFetcher,
+		},
+	}
+
+	t.Run("invalid transaction merkle proof", func(t *testing.T) {
+		broken := burnProof
+		broken.BlockHeader.MerkleRoot = chainhash.Hash{0x01}
+
+		err := v.verifyBurnLeaf(ctx, assetSpec, makeEntry(broken))
+		require.Error(t, err)
+		require.ErrorContains(t, err, "merkle proof")
+	})
+
+	t.Run("missing input provenance", func(t *testing.T) {
+		bare := burnProof
+		bare.AdditionalInputs = nil
+
+		err := v.verifyBurnLeaf(ctx, assetSpec, makeEntry(bare))
+		require.Error(t, err)
+		require.ErrorContains(t, err, "missing asset input")
+	})
+}
+
 // TestVerifyBurnLeaf tests verifyBurnLeaf.
 func TestVerifyBurnLeaf(t *testing.T) {
 	t.Parallel()
@@ -1074,5 +1150,17 @@ func TestVerifyBurnLeaf(t *testing.T) {
 
 		err = v.verifyBurnLeaf(ctx, assetSpec, burnEntry)
 		require.NoError(t, err)
+
+		// A bare proof suffix that doesn't embed the provenance of the
+		// burnt input can't be verified without a prior snapshot. This
+		// is what a burn leaf looked like before the sender embedded
+		// the input proofs (lightninglabs/taproot-assets#2285).
+		bareProof := burnProof
+		bareProof.AdditionalInputs = nil
+		burnEntry.BurnProof = &bareProof
+
+		err = v.verifyBurnLeaf(ctx, assetSpec, burnEntry)
+		require.Error(t, err)
+		require.ErrorContains(t, err, "missing asset input")
 	})
 }

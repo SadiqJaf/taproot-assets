@@ -825,14 +825,14 @@ func (p *ChainPorter) storePackageAnchorTxConf(pkg *sendPackage) error {
 	}
 
 	anchorTxBlockHeight := int32(pkg.TransferTxConfEvent.BlockHeight)
-	anchorTxBlockHeader := pkg.TransferTxConfEvent.Block.Header
 
 	// Now we scan through the VPacket for any burns.
 	//
 	// Once the anchor transaction is confirmed, we must populate the block
 	// header and block height in the proof suffixes of all outputs. Without
 	// the block height, burn events cannot be considered valid for
-	// inclusion in supply commitments.
+	// inclusion in supply commitments. The burn proofs also embed the
+	// proof files of their inputs (see buildBurnLeafProof).
 	var burns []*AssetBurn
 
 	for _, v := range pkg.VirtualPackets {
@@ -855,13 +855,23 @@ func (p *ChainPorter) storePackageAnchorTxConf(pkg *sendPackage) error {
 				AnchorTxid: pkg.OutboundPkg.AnchorTx.TxHash(),
 				Note:       pkg.Note,
 				ScriptKey:  &o.Asset.ScriptKey,
-				Proof:      o.ProofSuffix,
 				OutPoint:   op,
 			}
 
-			// Set the block height and header in the burn proof.
-			b.Proof.BlockHeight = uint32(anchorTxBlockHeight)
-			b.Proof.BlockHeader = anchorTxBlockHeader
+			// The burn proof is stored in a supply commitment
+			// leaf that other nodes (universe servers) verify
+			// without any knowledge of our local assets. So it
+			// has to carry its own provenance, the confirmed
+			// block data and the proofs of the burnt inputs.
+			burnProof, err := buildBurnLeafProof(
+				ctx, p.fetchInputProof, v, o,
+				pkg.TransferTxConfEvent,
+			)
+			if err != nil {
+				return fmt.Errorf("unable to build burn "+
+					"proof: %w", err)
+			}
+			b.Proof = burnProof
 
 			if o.Asset.GroupKey != nil {
 				groupKey := o.Asset.GroupKey.GroupPubKey

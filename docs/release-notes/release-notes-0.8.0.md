@@ -178,6 +178,14 @@
 
 ## Bug Fixes
 
+- **(Supply commitment burn leaves)**:
+  Burn leaves pushed to a universe server for supply commitments now embed
+  the confirmed anchor transaction data and the full proof files of the
+  spent inputs. Previously the bare proof suffix could not be verified
+  standalone, causing universe servers to reject supply commitments that
+  include burns
+  ([issue #2285](https://github.com/lightninglabs/taproot-assets/issues/2285)).
+
 - [PR#1898](https://github.com/lightninglabs/taproot-assets/pull/1898)
   ensures that funding output proofs are now always imported during
   force close handling for both channel initiator and responder.
