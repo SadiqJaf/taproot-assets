@@ -178,6 +178,15 @@
 
 ## Bug Fixes
 
+- **CommitVirtualPsbts `add=false` funding guard**
+  ([issue #2209](https://github.com/lightninglabs/taproot-assets/issues/2209)):
+  When `anchor_change_output.add` is `false` and `skip_funding` is not set,
+  `CommitVirtualPsbts` now fails closed with a descriptive error if lnd
+  funding would add or alter anchor change outputs instead of silently
+  returning a different output topology. Use `skip_funding=true` with
+  caller-supplied BTC inputs or set `add=true` until lnd supports a real
+  no-new-change funding mode.
+
 - [PR#1898](https://github.com/lightninglabs/taproot-assets/pull/1898)
   ensures that funding output proofs are now always imported during
   force close handling for both channel initiator and responder.
